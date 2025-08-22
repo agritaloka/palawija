@@ -27,7 +27,11 @@ enum Commands {
     },
     /// Lists all installed PHP versions
     List,
+		/// Displays the path to the currently active PHP binary
+		Which
 }
+
+use std::process::Command;
 
 fn main() {
     let cli = Cli::parse();
@@ -44,6 +48,17 @@ fn main() {
         Commands::List => {
             println!("List of installed PHP versions:");
             // TODO: Add logic to list versions here
+        }
+        Commands::Which => {
+            if cfg!(target_os = "windows") {
+                // For Windows
+                let output = Command::new("where.exe").arg("php").output().expect("Failed to execute command");
+                println!("{}", String::from_utf8_lossy(&output.stdout));
+            } else {
+                // For macOS and Linux
+                let output = Command::new("which").arg("php").output().expect("Failed to execute command");
+                println!("{}", String::from_utf8_lossy(&output.stdout));
+            }
         }
     }
 }
