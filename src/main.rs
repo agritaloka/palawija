@@ -1,19 +1,18 @@
 use clap::{ Parser, Subcommand };
 use std::process::Command;
-use std::io::{self, Write};
 use std::env;
 use std::path::{Path, PathBuf};
 
-// For symbolic links on Linux/macOS
-#[cfg(target_family = "unix")]
+// For symbolic links on Linux
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::symlink;
 
 #[derive(Parser)]
 #[command(
     author,
     version,
-    about = "A PHP version manager inspired by Agritaloka.",
-    long_about = None
+    about = "A powerful PHP version manager for Linux.",
+    long_about = "Easily switch between PHP versions on your Linux system with this awesome tool! 🚀"
 )]
 #[command(propagate_version = true)]
 struct Cli {
@@ -23,20 +22,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Installs a specific version of PHP
+    /// 📦 Installs a specific version of PHP
     Install {
         /// The PHP version to install (e.g., 8.1.10)
         version: String,
     },
-    /// Sets the global PHP version to use
+    /// ✨ Sets the global PHP version to use
     Use {
         /// The PHP version to use
         version: String,
     },
-    /// Lists all installed PHP versions
+    /// 📜 Lists all installed PHP versions
     List,
-    /// Displays the path to the currently active PHP binary
-    Which
+    /// 🔍 Displays the path to the currently active PHP binary
+    Which,
+    /// 🌐 Shows available PHP versions from official website
+    Available {
+        /// Required: filter by major version (e.g., 7, 8, 8.1)
+        version: Option<String>,
+    },
 }
 
 fn main() {
@@ -55,145 +59,233 @@ fn main() {
         }
         Commands::List => {
             println!("✨ List of installed PHP versions: ✨");
-            // TODO: Add logic to list versions here
+            if let Err(e) = list_installed_versions() {
+                eprintln!("🔴 Error listing installed versions: {}", e);
+            }
         }
         Commands::Which => {
-            if cfg!(target_os = "windows") {
-                let output = Command::new("where.exe").arg("php").output().expect("Failed to execute command");
-                println!("{}", String::from_utf8_lossy(&output.stdout));
-            } else {
-                let output = Command::new("which").arg("php").output().expect("Failed to execute command");
-                println!("{}", String::from_utf8_lossy(&output.stdout));
+            let output = Command::new("which").arg("php").output().expect("Failed to execute command");
+            println!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+        Commands::Available { version } => {
+            if version.is_none() {
+                eprintln!("❌ Sorry, you must provide a version prefix to search for.");
+                return;
+            }
+            println!("🌐 Fetching available PHP versions from official website...");
+            if let Err(e) = show_available_versions(version) {
+                eprintln!("🔴 Error fetching available versions: {}", e);
             }
         }
     }
 }
 
-// Function to install PHP
+// Function to show available PHP versions
+fn show_available_versions(filter: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("curl")
+        .arg("-s")
+        .arg("https://www.php.net/releases/")
+        .output()?;
+
+    if !output.status.success() {
+        return Err("Failed to fetch PHP releases page".into());
+    }
+
+    let html = String::from_utf8_lossy(&output.stdout);
+    let mut versions = Vec::new();
+
+    for line in html.lines() {
+        if line.contains("php-") && line.contains(".tar.gz") {
+            if let Some(start) = line.find("php-") {
+                let start_idx = start + 4;
+                if let Some(end) = line[start_idx..].find(".tar.gz") {
+                    let version = &line[start_idx..start_idx + end];
+                    if version.contains('.') && version.chars().any(|c| c.is_numeric()) {
+                        versions.push(version.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    versions.sort_by(|a, b| {
+        let a_parts: Vec<u32> = a.split('.').filter_map(|s| s.parse().ok()).collect();
+        let b_parts: Vec<u32> = b.split('.').filter_map(|s| s.parse().ok()).collect();
+        b_parts.cmp(&a_parts)
+    });
+    versions.dedup();
+
+    let active_versions = vec!["8.3", "8.2"];
+    let lts_versions = vec!["8.1"];
+
+    if versions.is_empty() {
+        println!("⚠️  Could not fetch available versions.");
+        return Ok(());
+    }
+
+    if let Some(filter_str) = filter {
+        println!("📋 Available PHP versions for {}:", filter_str);
+        let prefix = if filter_str.contains('.') {
+            format!("{}.", filter_str)
+        } else {
+            format!("{}.", filter_str)
+        };
+
+        let filtered: Vec<_> = versions.iter()
+            .filter(|v| v.starts_with(&prefix))
+            .collect();
+
+        if filtered.is_empty() {
+            println!("⚠️  No versions found for {}", filter_str);
+        } else {
+            for version in filtered {
+                let short = version.split('.').take(2).collect::<Vec<_>>().join(".");
+                if active_versions.contains(&short.as_str()) {
+                    println!("   • {} ⚡ (Active)", version);
+                } else if lts_versions.contains(&short.as_str()) {
+                    println!("   • {} 🔒 (LTS)", version);
+                } else {
+                    println!("   • {} ☠️ (EOL)", version);
+                }
+            }
+        }
+    }
+
+    println!("\nℹ️  Legend: ⚡ Active | 🔒 LTS | ☠️ EOL");
+    println!("💡 Use 'palawija install <version>' to install a specific version");
+    Ok(())
+}
+
+// Function to list installed PHP versions
+fn list_installed_versions() -> Result<(), Box<dyn std::error::Error>> {
+    let home = env::var("HOME")?;
+    let install_dir = PathBuf::from(format!("{}/.palawija", home));
+
+    if !install_dir.exists() {
+        println!("📭 No PHP versions installed yet.");
+        println!("💡 Use 'palawija available <version>' to see available versions");
+        println!("💡 Use 'palawija install <version>' to install a version");
+        return Ok(());
+    }
+
+    let mut installed_versions = Vec::new();
+
+    for entry in std::fs::read_dir(&install_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if path.is_dir() {
+            if let Some(name) = path.file_name() {
+                if let Some(name_str) = name.to_str() {
+                    if name_str.starts_with("php-") {
+                        let version = &name_str[4..];
+                        installed_versions.push(version.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if installed_versions.is_empty() {
+        println!("📭 No PHP versions installed yet.");
+    } else {
+        installed_versions.sort();
+        for version in installed_versions {
+            let php_bin_path = install_dir.join(format!("php-{}", version)).join("bin").join("php");
+            let is_active = if php_bin_path.exists() {
+                if let Ok(output) = Command::new("readlink").arg("/usr/local/bin/php").output() {
+                    let current_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    current_path == php_bin_path.to_string_lossy()
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if is_active {
+                println!("   • {} ⭐ (active)", version);
+            } else {
+                println!("   • {}", version);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn install_php(version: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("⚙️  Installing PHP version: {}", version);
 
-    // Determine the installation directory
-    let install_dir = if cfg!(target_os = "windows") {
-        let app_data = env::var("APPDATA")?;
-        format!("{}\\palawija", app_data)
-    } else {
-        format!("{}/.palawija", env::var("HOME")?)
-    };
-
-    // Create the directory if it doesn't exist
+    let install_dir = format!("{}/.palawija", env::var("HOME")?);
     std::fs::create_dir_all(&install_dir)?;
 
-    // Determine the download URL
-    // This is an example, the actual URL may need to be adjusted
-    let php_url = format!("https://www.php.net/distributions/php-{}.tar.gz", version);
-
-    if cfg!(target_os = "windows") {
-        // Installation logic for Windows
-        println!("⬇️ Downloading PHP from {}...", php_url);
-        let download_path = format!("{}\\php-{}.zip", install_dir, version);
-        
-        // Use Powershell to download and extract
-        let output = Command::new("powershell.exe")
-            .arg("-Command")
-            .arg(format!("Invoke-WebRequest -Uri {} -OutFile {}; Expand-Archive -Path {} -DestinationPath {}", php_url, download_path, download_path, install_dir))
-            .output()?;
-        
-        io::stdout().write_all(&output.stdout)?;
-        io::stderr().write_all(&output.stderr)?;
-
-        if !output.status.success() {
-            return Err("Failed to install PHP on Windows".into());
-        }
-
-    } else {
-        // Installation logic for macOS and Linux
-        println!("⬇️ Downloading PHP from {}...", php_url);
-        let tar_gz_path = format!("{}/php-{}.tar.gz", install_dir, version);
-
-        // Download the file using `curl` or `wget`
-        Command::new("curl")
-            .arg("-L")
-            .arg(&php_url)
-            .arg("-o")
-            .arg(&tar_gz_path)
-            .status()?;
-        
-        // Extract the file
-        println!("📂 Extracting files to {}...", install_dir);
-        let extracted_dir = format!("{}/php-{}", install_dir, version);
-        std::fs::create_dir(&extracted_dir)?;
-
-        Command::new("tar")
-            .arg("-xzf")
-            .arg(&tar_gz_path)
-            .arg("-C")
-            .arg(&extracted_dir)
-            .status()?;
-        
-        // Optional: delete the tar.gz file after extraction
-        std::fs::remove_file(&tar_gz_path)?;
-
-        // TODO: You may need to add compilation steps here if downloading from source code
-        // for example: `./configure`, `make`, `make install`
-        // This would be much more complex and depends on system dependencies
-        println!("✅ PHP installed to {}", extracted_dir);
+    let version_dir = format!("{}/php-{}", install_dir, version);
+    if Path::new(&version_dir).exists() {
+        println!("⚠️  PHP version {} is already installed!", version);
+        println!("💡 Use 'palawija use {}' to switch to this version", version);
+        return Ok(());
     }
 
-    println!("🎉 PHP version {} installed successfully! 🎉", version);
+    let php_url = format!("https://www.php.net/distributions/php-{}.tar.gz", version);
+    println!("⬇️ Downloading PHP from {}...", php_url);
+    let tar_gz_path = format!("{}/php-{}.tar.gz", install_dir, version);
+
+    let download_result = Command::new("curl")
+        .arg("-L")
+        .arg("-f")
+        .arg(&php_url)
+        .arg("-o")
+        .arg(&tar_gz_path)
+        .status()?;
+
+    if !download_result.success() {
+        return Err(format!("Failed to download PHP version {}. Please check if the version exists.", version).into());
+    }
+    
+    println!("📂 Extracting files to {}...", install_dir);
+    let extracted_dir = format!("{}/php-{}", install_dir, version);
+    std::fs::create_dir_all(&extracted_dir)?;
+
+    Command::new("tar")
+        .arg("-xzf")
+        .arg(&tar_gz_path)
+        .arg("-C")
+        .arg(&extracted_dir)
+        .arg("--strip-components=1")
+        .status()?;
+    
+    std::fs::remove_file(&tar_gz_path)?;
+
+    println!("✅ PHP extracted to {}", extracted_dir);
+    println!("⚠️  Note: This extracts the source code. You may need to compile it:");
+    println!("   cd {}", extracted_dir);
+    println!("   ./configure --prefix={}/bin", extracted_dir);
+    println!("   make && make install");
+
+    println!("\n🎉 PHP version {} downloaded successfully! Time to compile and code! 💻🎉", version);
     Ok(())
 }
 
 fn use_php(version: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Setting default PHP version to: {}", version);
 
-    let install_dir = if cfg!(target_os = "windows") {
-        let app_data = env::var("APPDATA")?;
-        PathBuf::from(format!("{}\\palawija", app_data))
-    } else {
-        let home = env::var("HOME")?;
-        PathBuf::from(format!("{}/.palawija", home))
-    };
+    let home = env::var("HOME")?;
+    let install_dir = PathBuf::from(format!("{}/.palawija", home));
 
-    let php_bin_path = if cfg!(target_os = "windows") {
-        // Location of php.exe
-        install_dir.join(format!("php-{}", version)).join("php.exe")
-    } else {
-        // Location of the php binary
-        install_dir.join(format!("php-{}", version)).join("bin").join("php")
-    };
+    let php_bin_path = install_dir.join(format!("php-{}", version)).join("bin").join("php");
 
     if !php_bin_path.exists() {
-        return Err(format!("PHP version {} is not installed at {:?}", version, php_bin_path).into());
+        return Err(format!("PHP version {} is not installed at {:?}. Use 'palawija install {}' first.", version, php_bin_path, version).into());
     }
 
-    if cfg!(target_os = "windows") {
-        // Logic for Windows
-        // Use Powershell to modify the 'Path' environment variable
-        let current_path = env::var("PATH").unwrap_or_default();
-        let new_path = format!("{};{}", php_bin_path.parent().unwrap().to_str().unwrap(), current_path);
-
-        let output = Command::new("powershell.exe")
-            .arg("-Command")
-            .arg(format!("[Environment]::SetEnvironmentVariable('Path', '{}', 'User')", new_path))
-            .output()?;
-            
-        io::stdout().write_all(&output.stdout)?;
-        io::stderr().write_all(&output.stderr)?;
-
-        if !output.status.success() {
-            return Err("Failed to set Path environment variable on Windows. Try running the program as an administrator.".into());
-        }
-
-    } else {
-        // Logic for Linux/macOS (using symlink)
-        let link_path = Path::new("/usr/local/bin/php");
-        if link_path.exists() {
-            std::fs::remove_file(link_path)?;
-        }
-        symlink(&php_bin_path, &link_path)?;
+    let link_path = Path::new("/usr/local/bin/php");
+    if link_path.exists() {
+        std::fs::remove_file(link_path)?;
     }
     
-    println!("✅ PHP version {} has been successfully set as default! ✅", version);
+    symlink(&php_bin_path, &link_path)?;
+    
+    println!("\n✅ PHP version {} is now your default. Happy coding! 🤩✅", version);
     Ok(())
 }
